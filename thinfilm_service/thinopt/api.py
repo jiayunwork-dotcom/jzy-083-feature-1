@@ -2,15 +2,17 @@
 
 Endpoints
 ---------
-GET  /health                  liveness probe
-POST /api/v1/reflectance      single point: stack + wavelength + angle -> R/T/A
-POST /api/v1/spectrum         wavelength scan: stack + range -> sampled spectrum
-GET  /api/v1/example          built-in quarter-wave AR demo, with expected values
+GET  /health                     liveness probe
+POST /api/v1/reflectance         single point: stack + wavelength + angle -> R/T/A
+POST /api/v1/reflectance/slab    whole sample: finite substrate + back face -> R/T/A
+POST /api/v1/spectrum            wavelength scan: stack + range -> sampled spectrum
+GET  /api/v1/example             built-in quarter-wave AR demo, with expected values
 
 The layer is deliberately thin: parsing/validation lives in
 :mod:`thinopt.validation`, physics in :mod:`thinopt.solver` /
-:mod:`thinopt.spectrum`.  Handlers hold no mutable state, so concurrent
-requests (each with its own stack and matrix intermediates) never interfere.
+:mod:`thinopt.spectrum` / :mod:`thinopt.substrate`.  Handlers hold no
+mutable state, so concurrent requests (each with its own stack and matrix
+intermediates) never interfere.
 """
 
 from __future__ import annotations
@@ -23,9 +25,17 @@ from . import presets
 from .matrices import Stack
 from .solver import PointResult, PolarizationResult, select_polarization, solve_point
 from .spectrum import scan_reflectance
+from .substrate import (
+    SlabPointResult,
+    SlabPolarizationResult,
+    select_slab_polarization,
+    solve_slab,
+)
 from .validation import (
+    SlabRequest,
     ValidationError,
     parse_point_request,
+    parse_slab_request,
     parse_spectrum_request,
 )
 
@@ -70,6 +80,50 @@ def _point_response(point: PointResult, polarization: str) -> dict[str, Any]:
     }
 
 
+def _rta_json(reflectance: float, transmittance: float, absorptance: float) -> dict[str, float]:
+    return {
+        "reflectance": reflectance,
+        "transmittance": transmittance,
+        "absorptance": absorptance,
+    }
+
+
+def _slab_coefficients_json(result: SlabPolarizationResult) -> dict[str, Any]:
+    """Both accounting scopes side by side: front-only coherent vs whole sample."""
+    return {
+        **_rta_json(result.reflectance, result.transmittance, result.absorptance),
+        "front_only": _rta_json(
+            result.front.reflectance, result.front.transmittance, result.front.absorptance
+        ),
+        "back_contribution": _rta_json(
+            result.reflectance - result.front.reflectance,
+            result.transmittance - result.front.transmittance,
+            result.absorptance - result.front.absorptance,
+        ),
+        "back_interface_reflectance": result.back.reflectance,
+        "round_trip_factor": result.round_trip_factor,
+    }
+
+
+def _slab_response(point: SlabPointResult, req: SlabRequest) -> dict[str, Any]:
+    return {
+        "wavelength": point.wavelength,
+        "angle_deg": point.angle_deg,
+        "polarization": req.polarization,
+        "substrate": {
+            "thickness": req.substrate.thickness,
+            "back_index": _complex_json(req.substrate.back_index),
+            # alpha is polarisation-independent; the s view carries it.
+            "single_pass_transmittance": point.s.single_pass_transmittance,
+        },
+        **_slab_coefficients_json(select_slab_polarization(point, req.polarization)),
+        "components": {
+            "s": _slab_coefficients_json(point.s),
+            "p": _slab_coefficients_json(point.p),
+        },
+    }
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
 
@@ -107,6 +161,13 @@ def create_app() -> Flask:
         req = parse_point_request(request.get_json(silent=True))
         point = solve_point(req.stack, req.wavelength, req.angle_deg)
         return jsonify(_point_response(point, req.polarization))
+
+    @app.post("/api/v1/reflectance/slab")
+    def reflectance_slab():
+        # Whole sample: coherent front stack + incoherent finite substrate.
+        req = parse_slab_request(request.get_json(silent=True))
+        point = solve_slab(req.stack, req.substrate, req.wavelength, req.angle_deg)
+        return jsonify(_slab_response(point, req))
 
     @app.post("/api/v1/spectrum")
     def spectrum():

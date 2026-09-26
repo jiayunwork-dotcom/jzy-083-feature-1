@@ -7,6 +7,8 @@ Module map (one responsibility each):
 * :mod:`thinopt.matrices`    complex 2x2 characteristic matrices and their product.
 * :mod:`thinopt.solver`      single-point reflectance / transmittance / absorptance.
 * :mod:`thinopt.spectrum`    wavelength scans built from the same solver.
+* :mod:`thinopt.substrate`   finite-thickness substrate: incoherent back-face
+                             channel summed in closed form, same front solver.
 * :mod:`thinopt.validation`  request parsing and physical-input validation.
 * :mod:`thinopt.presets`     built-in quarter-wave AR demo coating.
 * :mod:`thinopt.api`         Flask HTTP layer (JSON only).

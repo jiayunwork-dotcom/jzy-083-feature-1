@@ -48,11 +48,16 @@ class Layer:
 class Stack:
     """A complete multilayer system.
 
-    ``incident_index`` must be real (lossless incident medium) so that the
-    incident energy flux is well defined; layers and substrate may be complex.
+    ``incident_index`` is real (lossless incident medium) for every public
+    endpoint — the validation layer enforces it — so that the incident
+    energy flux is well defined; layers and substrate may be complex.  The
+    finite-substrate channel (:mod:`thinopt.substrate`) additionally reuses
+    the same solver with the (possibly complex) substrate index as the
+    incident medium of the reverse pass, where the flux is still set by
+    ``Re(eta)``.
     """
 
-    incident_index: float
+    incident_index: complex
     substrate_index: complex
     layers: tuple[Layer, ...]
 
@@ -94,7 +99,23 @@ def stack_matrix(
     layers, which makes the result reduce exactly to the single-interface
     Fresnel coefficients between incident medium and substrate).
     """
-    sin_theta0 = math.sin(angle_rad)
+    return stack_matrix_sine(stack, wavelength, math.sin(angle_rad), polarization)
+
+
+def stack_matrix_sine(
+    stack: Stack,
+    wavelength: float,
+    sin_theta0: complex,
+    polarization: str,
+) -> tuple[np.ndarray, complex, complex]:
+    """System matrix parameterised by sin(theta) in the incident medium.
+
+    Identical maths to :func:`stack_matrix`.  Only the conserved tangential
+    wavevector ``N_0 * sin(theta_0)`` ever enters the layer matrices, so a
+    complex sine — the propagation direction inside an absorbing substrate,
+    needed for the reverse pass of the finite-substrate channel — flows
+    through the very same code path with no special casing.
+    """
     matrix = np.identity(2, dtype=complex)
     for layer in stack.layers:
         cos_t = cos_theta_in_layer(layer.index, sin_theta0, stack.incident_index)

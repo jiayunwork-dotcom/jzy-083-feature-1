@@ -8,7 +8,9 @@ Every physical constraint is enforced here, *before* any matrix is built:
   energy flux — and hence R/T/A — is not well defined;
 * wavelength must be > 0;
 * angle of incidence must be in [0, 90) degrees;
-* polarisation must be one of ``s`` / ``p`` / ``avg``.
+* polarisation must be one of ``s`` / ``p`` / ``avg``;
+* for finite-substrate requests, the physical substrate thickness must be
+  > 0 and the back-medium index follows the same index rules.
 
 Violations raise :class:`ValidationError` carrying structured per-field
 details, which the HTTP layer serialises into the JSON error body.
@@ -22,6 +24,7 @@ from typing import Any
 
 from .matrices import Layer, Stack
 from .optics import POL_AVG, POL_P, POL_S
+from .substrate import FiniteSubstrate
 
 POLARIZATIONS = (POL_S, POL_P, POL_AVG)
 DEFAULT_POLARIZATION = POL_S
@@ -152,6 +155,16 @@ def parse_num_points(value: Any, errors: list[FieldError]) -> int:
     return value
 
 
+def parse_substrate_thickness(value: Any, errors: list[FieldError]) -> float:
+    """Physical substrate thickness; finite and > 0 (same unit as wavelength)."""
+    if not _is_finite_real(value):
+        errors.append(FieldError("substrate_thickness", "substrate thickness must be a finite number"))
+        return 1.0
+    if value <= 0.0:
+        errors.append(FieldError("substrate_thickness", "substrate thickness must be > 0"))
+    return float(value)
+
+
 @dataclass(frozen=True)
 class PointRequest:
     stack: Stack
@@ -166,6 +179,15 @@ class SpectrumRequest:
     wavelength_start: float
     wavelength_stop: float
     num_points: int
+    angle_deg: float
+    polarization: str
+
+
+@dataclass(frozen=True)
+class SlabRequest:
+    stack: Stack
+    substrate: FiniteSubstrate
+    wavelength: float
     angle_deg: float
     polarization: str
 
@@ -208,6 +230,32 @@ def parse_spectrum_request(payload: Any) -> SpectrumRequest:
         wavelength_start=start,
         wavelength_stop=stop,
         num_points=num_points,
+        angle_deg=angle,
+        polarization=polarization,
+    )
+
+
+def parse_slab_request(payload: Any) -> SlabRequest:
+    """Validate a finite-substrate (whole-sample) request, or raise ValidationError.
+
+    Same stack/wavelength/angle/polarisation fields as the single-point
+    request, plus the two slab fields: ``substrate_thickness`` (physical
+    thickness, > 0) and ``back_index`` (medium behind the substrate).
+    """
+    body = _require_object(payload)
+    errors: list[FieldError] = []
+    stack = parse_stack(body, errors)
+    thickness = parse_substrate_thickness(body.get("substrate_thickness"), errors)
+    back_index = parse_index(body.get("back_index"), "back_index", errors)
+    wavelength = parse_wavelength(body.get("wavelength"), "wavelength", errors)
+    angle = parse_angle(body.get("angle_deg", 0.0), errors)
+    polarization = parse_polarization(body.get("polarization"), errors)
+    if errors:
+        raise ValidationError(errors)
+    return SlabRequest(
+        stack=stack,
+        substrate=FiniteSubstrate(thickness=thickness, back_index=back_index),
+        wavelength=wavelength,
         angle_deg=angle,
         polarization=polarization,
     )

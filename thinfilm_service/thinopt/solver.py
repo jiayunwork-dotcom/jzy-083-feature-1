@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .matrices import Stack, stack_matrix
+from .matrices import Stack, stack_matrix_sine
 from .optics import POL_AVG, POL_P, POL_S
 
 #: Residuals below this magnitude are floating-point noise, not physics.
@@ -78,7 +78,25 @@ def solve_polarization(
     polarization: str,
 ) -> PolarizationResult:
     """R/T/A for one polarisation at one wavelength and angle of incidence."""
-    matrix, eta_0, eta_s = stack_matrix(stack, wavelength, math.radians(angle_deg), polarization)
+    return solve_polarization_sine(
+        stack, wavelength, math.sin(math.radians(angle_deg)), polarization
+    )
+
+
+def solve_polarization_sine(
+    stack: Stack,
+    wavelength: float,
+    sin_theta0: complex,
+    polarization: str,
+) -> PolarizationResult:
+    """R/T/A parameterised by sin(theta) in the incident medium.
+
+    Identical maths to :func:`solve_polarization`; the sine form simply
+    admits a complex propagation sine, which the finite-substrate channel
+    (:mod:`thinopt.substrate`) needs when the front stack is solved from
+    inside an absorbing substrate.
+    """
+    matrix, eta_0, eta_s = stack_matrix_sine(stack, wavelength, sin_theta0, polarization)
     m11, m12 = matrix[0, 0], matrix[0, 1]
     m21, m22 = matrix[1, 0], matrix[1, 1]
 

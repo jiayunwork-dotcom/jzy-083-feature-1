@@ -171,6 +171,132 @@ class TestValidation:
         assert response.content_type.startswith("application/json")
 
 
+class TestSlabEndpoint:
+    """Whole-sample endpoint: finite substrate with the incoherent back face."""
+
+    def _slab_request(self, **overrides):
+        payload = _demo_request(
+            substrate_thickness=5.0e5,  # 0.5 mm of glass, in nm
+            back_index=1.0,
+        )
+        payload.update(overrides)
+        return payload
+
+    def test_both_scopes_reported(self, client):
+        body = client.post("/api/v1/reflectance/slab", json=self._slab_request()).get_json()
+        # Front-only coherent scope: the familiar quarter-wave AR value.
+        assert body["front_only"]["reflectance"] == pytest.approx(0.0126, abs=1e-3)
+        # Whole-sample scope: the bare back face (~4.26 %) adds its share.
+        assert body["reflectance"] == pytest.approx(0.0542, abs=2e-4)
+        assert body["reflectance"] > 3.0 * body["front_only"]["reflectance"]
+        assert body["back_contribution"]["reflectance"] == pytest.approx(
+            body["reflectance"] - body["front_only"]["reflectance"], abs=1e-15
+        )
+        assert body["back_contribution"]["reflectance"] == pytest.approx(0.0416, abs=2e-4)
+        total = body["reflectance"] + body["transmittance"] + body["absorptance"]
+        assert total == pytest.approx(1.0, abs=LOOSE)
+        assert set(body["components"]) == {"s", "p"}
+        assert body["substrate"]["single_pass_transmittance"] == pytest.approx(1.0)
+
+    def test_degenerate_matches_reflectance_endpoint(self, client):
+        """Back index == substrate index: the slab endpoint must reproduce
+        the plain reflectance endpoint exactly (semi-infinite limit)."""
+        payload = self._slab_request(back_index=1.52, angle_deg=35.0, polarization="p")
+        slab = client.post("/api/v1/reflectance/slab", json=payload).get_json()
+        front_payload = _demo_request(angle_deg=35.0, polarization="p")
+        front = client.post("/api/v1/reflectance", json=front_payload).get_json()
+        assert slab["reflectance"] == pytest.approx(front["reflectance"], abs=1e-12)
+        assert slab["transmittance"] == pytest.approx(front["transmittance"], abs=1e-12)
+        assert slab["front_only"]["reflectance"] == pytest.approx(
+            front["reflectance"], abs=1e-15
+        )
+
+    def test_absorbing_substrate_energy_balance(self, client):
+        payload = self._slab_request(
+            substrate={"re": 1.52, "im": 1e-3}, substrate_thickness=2.0e5
+        )
+        body = client.post("/api/v1/reflectance/slab", json=payload).get_json()
+        total = body["reflectance"] + body["transmittance"] + body["absorptance"]
+        assert total == pytest.approx(1.0, abs=LOOSE)
+        assert body["absorptance"] > 0.0
+        assert body["substrate"]["single_pass_transmittance"] < 1.0
+        # The back channel is attenuated compared with the lossless case.
+        lossless = client.post(
+            "/api/v1/reflectance/slab", json=self._slab_request()
+        ).get_json()
+        assert body["back_contribution"]["reflectance"] < (
+            lossless["back_contribution"]["reflectance"]
+        )
+
+    def test_avg_polarization_is_mean_of_components(self, client):
+        body = client.post(
+            "/api/v1/reflectance/slab",
+            json=self._slab_request(angle_deg=50.0, polarization="avg"),
+        ).get_json()
+        mean_r = 0.5 * (
+            body["components"]["s"]["reflectance"] + body["components"]["p"]["reflectance"]
+        )
+        assert body["reflectance"] == pytest.approx(mean_r, abs=1e-15)
+
+    @pytest.mark.parametrize(
+        "override, field",
+        [
+            ({"substrate_thickness": 0.0}, "substrate_thickness"),
+            ({"substrate_thickness": -1.0}, "substrate_thickness"),
+            ({"substrate_thickness": "0.5mm"}, "substrate_thickness"),
+            ({"substrate_thickness": None}, "substrate_thickness"),
+            ({"back_index": 0.0}, "back_index"),
+            ({"back_index": {"re": -1.0, "im": 0.5}}, "back_index"),
+            ({"back_index": None}, "back_index"),
+            ({"wavelength": -550.0}, "wavelength"),
+            ({"angle_deg": 90.0}, "angle_deg"),
+        ],
+    )
+    def test_invalid_slab_inputs_rejected(self, client, override, field):
+        response = client.post("/api/v1/reflectance/slab", json=self._slab_request(**override))
+        assert response.status_code == 400
+        error = response.get_json()["error"]
+        assert error["type"] == "validation_error"
+        assert any(d["field"] == field for d in error["details"])
+
+    def test_missing_slab_fields_rejected(self, client):
+        payload = self._slab_request()
+        del payload["substrate_thickness"]
+        del payload["back_index"]
+        response = client.post("/api/v1/reflectance/slab", json=payload)
+        assert response.status_code == 400
+        fields = {d["field"] for d in response.get_json()["error"]["details"]}
+        assert {"substrate_thickness", "back_index"} <= fields
+
+    def test_parallel_slab_requests_isolated(self, client):
+        """Concurrent whole-sample requests with distinct slabs must not interfere."""
+        app = create_app()
+
+        def work(tag: int):
+            thread_client = app.test_client()
+            reflectances = set()
+            for _ in range(5):
+                body = thread_client.post(
+                    "/api/v1/reflectance/slab",
+                    json=self._slab_request(
+                        substrate_thickness=1.0e5 * (1 + tag),
+                        back_index=1.0 + 0.01 * tag,
+                        wavelength=500.0 + tag,
+                        angle_deg=float(tag),
+                    ),
+                ).get_json()
+                assert body["wavelength"] == pytest.approx(500.0 + tag)
+                assert 0.0 <= body["reflectance"] <= 1.0
+                reflectances.add(body["reflectance"])
+            # Same input -> identical output on every retry (no cross-talk).
+            assert len(reflectances) == 1
+            return reflectances.pop()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(work, range(16)))
+        assert len(set(results)) > 1
+
+
 class TestConcurrency:
     """Concurrent requests with different stacks must not interfere."""
 
