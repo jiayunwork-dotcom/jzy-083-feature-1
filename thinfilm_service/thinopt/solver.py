@@ -18,12 +18,19 @@ reduce to the textbook single-interface Fresnel formulas.)
 The incident medium is required to be lossless (validated upstream), which
 keeps the incident flux ``Re(eta_0)`` well defined and guarantees the energy
 balance ``R + T = 1`` for lossless stacks and ``R + A + T = 1`` in general.
+
+:func:`coefficients_from_matrix` is the single place where a system matrix
+becomes energy coefficients; the finite-substrate incoherent cascade
+(:mod:`thinopt.incoherent`) reuses it on the same matrix, so the front-stack
+caliber never forks into a second algorithm.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
+import numpy as np
 
 from .matrices import Stack, stack_matrix
 from .optics import POL_AVG, POL_P, POL_S
@@ -71,14 +78,15 @@ def _clean(value: float) -> float:
     return value
 
 
-def solve_polarization(
-    stack: Stack,
-    wavelength: float,
-    angle_deg: float,
-    polarization: str,
+def coefficients_from_matrix(
+    matrix: np.ndarray, eta_0: complex, eta_s: complex
 ) -> PolarizationResult:
-    """R/T/A for one polarisation at one wavelength and angle of incidence."""
-    matrix, eta_0, eta_s = stack_matrix(stack, wavelength, math.radians(angle_deg), polarization)
+    """R/T/A and amplitudes from the system matrix and boundary admittances.
+
+    This is the forward direction (light incident from the ``eta_0`` side);
+    :func:`thinopt.incoherent.reverse_coefficients` evaluates the *same*
+    matrix for the opposite direction.
+    """
     m11, m12 = matrix[0, 0], matrix[0, 1]
     m21, m22 = matrix[1, 0], matrix[1, 1]
 
@@ -98,6 +106,17 @@ def solve_polarization(
         r=complex(r),
         t=complex(t),
     )
+
+
+def solve_polarization(
+    stack: Stack,
+    wavelength: float,
+    angle_deg: float,
+    polarization: str,
+) -> PolarizationResult:
+    """R/T/A for one polarisation at one wavelength and angle of incidence."""
+    matrix, eta_0, eta_s = stack_matrix(stack, wavelength, math.radians(angle_deg), polarization)
+    return coefficients_from_matrix(matrix, eta_0, eta_s)
 
 
 def solve_point(stack: Stack, wavelength: float, angle_deg: float) -> PointResult:

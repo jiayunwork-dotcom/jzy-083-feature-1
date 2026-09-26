@@ -27,6 +27,8 @@ POLARIZATIONS = (POL_S, POL_P, POL_AVG)
 DEFAULT_POLARIZATION = POL_S
 DEFAULT_SPECTRUM_POINTS = 201
 MAX_SPECTRUM_POINTS = 20001
+#: Medium beyond the sample's back face when the request does not say: air.
+DEFAULT_BACK_INDEX = complex(1.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -210,4 +212,59 @@ def parse_spectrum_request(payload: Any) -> SpectrumRequest:
         num_points=num_points,
         angle_deg=angle,
         polarization=polarization,
+    )
+
+
+def parse_substrate_thickness(value: Any, errors: list[FieldError]) -> float:
+    """Physical thickness of the finite substrate; finite number > 0.
+
+    Same unit as the wavelength and layer thicknesses (typically nm, so a
+    0.5 mm slide is 5e5).  The incoherent model assumes the thickness is far
+    above the coherence length; enforcing ``> 0`` is what keeps the cascade
+    physically meaningful.
+    """
+    if not _is_finite_real(value):
+        errors.append(FieldError("substrate_thickness", "substrate thickness must be a finite number"))
+        return 1.0
+    if value <= 0.0:
+        errors.append(FieldError("substrate_thickness", "substrate thickness must be > 0"))
+    return float(value)
+
+
+def parse_back_index(value: Any, errors: list[FieldError]) -> complex:
+    """Refractive index of the medium beyond the back face; defaults to air."""
+    if value is None:
+        return DEFAULT_BACK_INDEX
+    return parse_index(value, "back_index", errors)
+
+
+@dataclass(frozen=True)
+class SampleRequest:
+    stack: Stack
+    wavelength: float
+    angle_deg: float
+    polarization: str
+    substrate_thickness: float
+    back_index: complex
+
+
+def parse_sample_request(payload: Any) -> SampleRequest:
+    """Validate a finite-substrate sample request, or raise ValidationError."""
+    body = _require_object(payload)
+    errors: list[FieldError] = []
+    stack = parse_stack(body, errors)
+    wavelength = parse_wavelength(body.get("wavelength"), "wavelength", errors)
+    angle = parse_angle(body.get("angle_deg", 0.0), errors)
+    polarization = parse_polarization(body.get("polarization"), errors)
+    thickness = parse_substrate_thickness(body.get("substrate_thickness"), errors)
+    back_index = parse_back_index(body.get("back_index"), errors)
+    if errors:
+        raise ValidationError(errors)
+    return SampleRequest(
+        stack=stack,
+        wavelength=wavelength,
+        angle_deg=angle,
+        polarization=polarization,
+        substrate_thickness=thickness,
+        back_index=back_index,
     )

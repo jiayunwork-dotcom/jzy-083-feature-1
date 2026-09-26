@@ -5,12 +5,15 @@ Endpoints
 GET  /health                  liveness probe
 POST /api/v1/reflectance      single point: stack + wavelength + angle -> R/T/A
 POST /api/v1/spectrum         wavelength scan: stack + range -> sampled spectrum
+POST /api/v1/sample           finite-thickness substrate: coherent front stack
+                              plus the incoherent back-surface channel
 GET  /api/v1/example          built-in quarter-wave AR demo, with expected values
 
 The layer is deliberately thin: parsing/validation lives in
 :mod:`thinopt.validation`, physics in :mod:`thinopt.solver` /
-:mod:`thinopt.spectrum`.  Handlers hold no mutable state, so concurrent
-requests (each with its own stack and matrix intermediates) never interfere.
+:mod:`thinopt.spectrum` / :mod:`thinopt.incoherent`.  Handlers hold no
+mutable state, so concurrent requests (each with its own stack and matrix
+intermediates) never interfere.
 """
 
 from __future__ import annotations
@@ -20,12 +23,20 @@ from typing import Any
 from flask import Flask, jsonify, request
 
 from . import presets
+from .incoherent import (
+    EnergyCoefficients,
+    SamplePolarizationResult,
+    SampleResult,
+    select_sample_polarization,
+    solve_sample,
+)
 from .matrices import Stack
 from .solver import PointResult, PolarizationResult, select_polarization, solve_point
 from .spectrum import scan_reflectance
 from .validation import (
     ValidationError,
     parse_point_request,
+    parse_sample_request,
     parse_spectrum_request,
 )
 
@@ -66,6 +77,43 @@ def _point_response(point: PointResult, polarization: str) -> dict[str, Any]:
         "components": {
             "s": _coefficients_json(point.s),
             "p": _coefficients_json(point.p),
+        },
+    }
+
+
+def _energy_json(coefficients: EnergyCoefficients) -> dict[str, float]:
+    return {
+        "reflectance": coefficients.reflectance,
+        "transmittance": coefficients.transmittance,
+        "absorptance": coefficients.absorptance,
+    }
+
+
+def _sample_polarization_json(result: SamplePolarizationResult) -> dict[str, Any]:
+    return {
+        "front_only": _energy_json(result.front_only),
+        "with_back": _energy_json(result.with_back),
+        "diagnostics": {
+            "single_pass_transmittance": result.single_pass_transmittance,
+            "back_interface_reflectance": result.back_interface_reflectance,
+            "back_interface_transmittance": result.back_interface_transmittance,
+            "front_stack_reverse_reflectance": result.front_reverse_reflectance,
+            "front_stack_reverse_transmittance": result.front_reverse_transmittance,
+        },
+    }
+
+
+def _sample_response(sample: SampleResult, polarization: str) -> dict[str, Any]:
+    return {
+        "wavelength": sample.wavelength,
+        "angle_deg": sample.angle_deg,
+        "polarization": polarization,
+        "substrate_thickness": sample.substrate_thickness,
+        "back_index": _complex_json(sample.back_index),
+        **_sample_polarization_json(select_sample_polarization(sample, polarization)),
+        "components": {
+            "s": _sample_polarization_json(sample.s),
+            "p": _sample_polarization_json(sample.p),
         },
     }
 
@@ -134,6 +182,21 @@ def create_app() -> Flask:
                 ],
             }
         )
+
+    @app.post("/api/v1/sample")
+    def sample():
+        # Finite-thickness substrate: the front stack stays coherent (same
+        # matrix solver as /api/v1/reflectance); the substrate round trips
+        # are summed incoherently in closed form.
+        req = parse_sample_request(request.get_json(silent=True))
+        result = solve_sample(
+            req.stack,
+            req.wavelength,
+            req.angle_deg,
+            req.substrate_thickness,
+            req.back_index,
+        )
+        return jsonify(_sample_response(result, req.polarization))
 
     @app.get("/api/v1/example")
     def example():
